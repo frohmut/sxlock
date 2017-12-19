@@ -148,8 +148,230 @@ handle_signal(int sig) {
     die("Caught signal %d; dying\n", sig);
 }
 
+struct TestQ {
+        char *question;
+        char *answer;
+};
+
+struct Test {
+        size_t cur_test;
+        const char *cur_question;
+        const char *expected_answer;
+
+        const char *prev_answer;
+        char *wrong_answer;
+
+        struct TestQ *tests;
+
+        size_t s_tests;
+        size_t n_tests;
+
+        size_t n_checks;
+        size_t n_correct;
+        size_t n_checked;
+        size_t n_were_correct;
+};
+
+static void
+test_del(struct Test *test) {
+        if (!test) return;
+        for (size_t i = 0; i < test->n_tests; i++) {
+                free(test->tests[i].answer);
+                free(test->tests[i].question);
+        }
+        free(test->wrong_answer);
+        free(test->tests);
+        free(test);
+}
+
+static int
+get_test_config(const char *username, char fpath[256], size_t *n_correct, size_t *n_checks) {
+        char filebuf[10000];
+
+        FILE *f = fopen("/etc/sxlock.conf", "r");
+        if (!f) {
+                printf("file %s not found\n", fpath);
+                return 1;
+        }
+        for (size_t i = 0; i < sizeof filebuf; i++) {
+                filebuf[i] = 0;
+        }
+        size_t len = fread(filebuf, sizeof filebuf, 1, f);
+        if (len != len) {}
+        fclose(f);
+        for (size_t i = 0, f = 0; filebuf[i] != 0; i++) {
+                if (filebuf[i] == '\n') {
+                        char *line = filebuf + f;
+                        f = i + 1;
+
+                        char *u = strtok(line, "-");
+                        if (strcmp(u, username) != 0) {
+                                continue;
+                        }
+
+                        char *k = strtok(NULL, "=");
+                        char *r = strtok(NULL, "\n");
+                        if (!r) return 1;
+
+                        if (strcmp(k, "path") == 0) {
+                                strcpy(fpath, r);
+                        } else if (strcmp(k, "checks") == 0) {
+                                char *h;
+                                *n_checks = strtol(r, &h, 10);
+                        } else if (strcmp(k, "correct") == 0) {
+                                char *h;
+                                *n_correct = strtol(r, &h, 10);
+                        }
+                }
+        }
+        return 0;
+}
+
+static void
+test_shuffle(struct Test *test) {
+        size_t n = test->n_tests;
+        struct TestQ v, *t = test->tests;
+
+        for (size_t i = 0; i < n; i++) {
+                size_t j = i + rand() / (RAND_MAX / (n - i) + 1);
+                v = t[j];
+                t[j] = t[i];
+                t[i] = v;
+        }
+}
+
+static struct Test *
+test_create(const char *username) {
+
+        char filebuf[10000];
+        size_t n_correct = 0, n_checks = 0;
+        char fpath[265];
+
+        int err = get_test_config(username, fpath, &n_correct, &n_checks);
+        if (err) {
+                return NULL;
+        }
+
+        // read whole file to filebuf
+        for (size_t i = 0; i < sizeof filebuf; i++) {
+                filebuf[i] = 0;
+        }
+        FILE *f = fopen(fpath, "r");
+        if (!f) {
+                printf("could not open file %s\n", fpath);
+                return NULL;
+        }
+        size_t len = fread(filebuf, sizeof filebuf, 1, f);
+        int had_err = ferror(f);
+        fclose(f);
+        if (had_err || len != len) {
+                printf("had err in file %s: %s\n", fpath, strerror(had_err));
+                return NULL;
+        }
+
+        // setup test from CSV file
+        struct Test *t;
+        t = calloc(sizeof *t, 1);
+
+        t->s_tests = 500;
+        t->tests = malloc(sizeof t->tests[0] * t->s_tests);
+        size_t n = 0;
+        for (size_t i = 0, f = 0; filebuf[i] != 0; i++) {
+                if (filebuf[i] == ';' || filebuf[i] == '\n') {
+                        char *el = malloc(i - f + 1);
+                        strncpy(el, filebuf + f, i - f);
+                        el[i - f] = 0;
+                        f = i + 1;
+                        if (n % 2 == 0) {
+                                t->tests[n / 2].answer = el;
+                        } else {
+                                t->tests[n / 2].question = el;
+                                ++t->n_tests;
+                        }
+                        ++n;
+                }
+        }
+
+        test_shuffle(t);
+
+        t->expected_answer = t->tests[0].answer;
+        t->cur_question = t->tests[0].question;
+        t->cur_test = 0;
+
+        // check values
+        t->n_checks = n_checks > 0 ? n_checks : t->n_tests;
+        t->n_correct = n_correct > 0 ? n_correct : t->n_tests;
+
+        return t;
+}
+
+static void
+test_draw(struct Test *test, Window w, GC gc, WindowPositionInfo* info, unsigned int inputlen) {
+        char buf[265];
+
+        int x = info->output_x + 10;
+        int y = info->output_y + 20;
+        int yinc = 30;
+
+        XClearArea(dpy, w, info->output_x, info->output_y, info->output_width / 2, info->output_height / 2 - 50, False);
+
+        if (test->cur_question) {
+                XDrawString(dpy, w, gc, x, y, test->cur_question, strlen(test->cur_question));
+        }
+        y += yinc;
+
+        strncpy(buf, password, inputlen);
+        buf[inputlen] = 0;
+        XDrawString(dpy, w, gc, x, y, buf, strlen(buf));
+        y += yinc;
+
+        sprintf(buf, "Test %ld/%ld; Correct %ld/%ld", test->cur_test + 1, test->n_checks, test->n_were_correct, test->n_correct);
+        XDrawString(dpy, w, gc, x, y, buf, strlen(buf));
+        y += yinc;
+
+        if (test->wrong_answer) {
+                sprintf(buf, "%s <-> %s", test->wrong_answer, test->prev_answer);
+                XDrawString(dpy, w, gc, x, y, buf, strlen(buf));
+        } else if (test->prev_answer) {
+                sprintf(buf, "OK: %s", test->prev_answer);
+                XDrawString(dpy, w, gc, x, y, buf, strlen(buf));
+        }
+        y += yinc;
+}
+
+static int
+test_check_answer(struct Test *test, const char *answer) {
+        if (test->expected_answer == NULL) {
+                return 0;
+        }
+
+        free(test->wrong_answer);
+        test->wrong_answer = NULL;
+
+        // check answer
+        ++test->n_checked;
+        if (strcmp(test->expected_answer, answer) != 0) {
+                test->wrong_answer = strdup(answer);
+        } else {
+                ++test->n_were_correct;
+        }
+        test->prev_answer = test->expected_answer;
+        ++test->cur_test;
+
+        // get next test
+        if (test->cur_test >= test->n_tests) {
+                test->cur_test = 0;
+        }
+        test->expected_answer = test->tests[test->cur_test].answer;
+        test->cur_question = test->tests[test->cur_test].question;
+
+        // need more checks?
+        int the_end = test->n_checked >= test->n_checks && test->n_were_correct >= test->n_correct;
+        return !the_end;
+}
+
 void
-main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char passdisp[256], char* username, XColor UNUSED(black), XColor white, XColor red, Bool hidelength) {
+main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char passdisp[256], char* username, XColor UNUSED(black), XColor white, XColor red, Bool hidelength, struct Test *test) {
     XEvent event;
     KeySym ksym;
 
@@ -193,7 +415,9 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
             XClearArea(dpy, w, info->output_x, base_y + 20, info->output_width, ascent + descent, False);
 
             /* draw new passdisp or 'auth failed' */
-            if (failed) {
+            if (test) {
+                test_draw(test, w, gc, info, len);
+            } else if (failed) {
                 x = base_x - XTextWidth(font, "authentication failed", 21) / 2;
                 XSetForeground(dpy, gc, red.pixel);
                 XDrawString(dpy, w, gc, x, base_y + ascent + 20, "authentication failed", 21);
@@ -223,7 +447,9 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
                 case XK_Return:
                 case XK_KP_Enter:
                     password[len] = 0;
-                    if (pam_authenticate(pam_handle, 0) == PAM_SUCCESS) {
+                    if (test) {
+                        running = test_check_answer(test, password);
+                    } else if (pam_authenticate(pam_handle, 0) == PAM_SUCCESS) {
                         clear_password_memory();
                         running = False;
                     } else {
@@ -476,8 +702,12 @@ main(int argc, char** argv) {
         DPMSEnable(dpy);
     }
 
+    struct Test *test = test_create(username);
+
     /* run main loop */
-    main_loop(w, gc, font, &info, passdisp, opt_username, black, white, red, opt_hidelength);
+    main_loop(w, gc, font, &info, passdisp, opt_username, black, white, red, opt_hidelength, test);
+
+    test_del(test);
 
     /* restore dpms settings */
     if (using_dpms) {
