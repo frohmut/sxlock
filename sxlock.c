@@ -316,6 +316,16 @@ test_draw(struct Test *test, Window w, GC gc, WindowPositionInfo* info, unsigned
         XClearArea(dpy, w, info->output_x, info->output_y, info->output_width / 2, info->output_height / 2 - 50, False);
 
         if (test->cur_question) {
+                /*
+                const char *fontlist = "-misc-fixed-medium-r-*--17-120-*-*-*-*-*-*";
+                const char *fontlist = "-misc-fixed-medium-r-*--17-120-*-*-*-*-iso10646-1";
+                char **missing_charset;
+                int missing_charset_count;
+                char *def_string;
+                XFontSet fontset = XCreateFontSet(dpy, fontlist, &missing_charset, &missing_charset_count, &def_string);
+                Xutf8DrawString(dpy, w, fontset, gc, x, y, test->cur_question, strlen(test->cur_question));
+                //XFreeFontSet(dpy, fontset);
+                */
                 XDrawString(dpy, w, gc, x, y, test->cur_question, strlen(test->cur_question));
         }
         y += yinc;
